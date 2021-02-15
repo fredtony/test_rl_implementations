@@ -15,6 +15,7 @@ from numpy.lib.financial import _npv_dispatcher
 import torch
 from torch import nn, optim
 from torch.distributions import Categorical
+import matplotlib.pyplot as plt
 
 
 warnings.filterwarnings("ignore")
@@ -22,61 +23,33 @@ warnings.filterwarnings("ignore")
 GAMMA = 0.99
 EPS = np.finfo(np.float32).eps.item()
 MAX_STEPS = 1000
-MAX_EPISODES = 2000
+MAX_EPISODES = 3000
 SHOW_RENDER = False
 LOG_INTERVAL = 10
 LR = 1e-2
-GAME = "LunarLander-v2" # "CartPole-v1"
-N_INPUTS = 8 # 4
-N_HIDDEN = 512 # 256
-N_OUTPUTS = 4 # 2
+GAME = "LunarLander-v2"  # "CartPole-v1"
+N_INPUTS = 8  # 4
+N_HIDDEN = 512  # 256
+N_OUTPUTS = 4  # 2
 
+policy_net = nn.Sequential(
+    nn.Linear(N_INPUTS, N_HIDDEN),
+    nn.Dropout(p=0.6),
+    nn.ReLU(),
+    nn.Linear(N_HIDDEN, N_OUTPUTS),
+    nn.Softmax(dim=1),
+)
 
-class PolicyNet(nn.Module):
-    def __init__(
-        self,
-        n_inputs: int = N_INPUTS,
-        n_hidden: int = N_HIDDEN,
-        n_outputs: int = N_OUTPUTS,
-    ):
-        super(PolicyNet, self).__init__()
-        # Neural net layers
-        self.linear1 = nn.Linear(n_inputs, n_hidden)
-        self.linear2 = nn.Linear(n_hidden, n_outputs)
-
-    def forward(self, x):
-        model = nn.Sequential(
-            self.linear1,
-            nn.Dropout(p=0.6),
-            nn.ReLU(),
-            self.linear2,
-            nn.Softmax(dim=1),
-        )
-        return model(x)
-
-
-class ValueNet(nn.Module):
-    def __init__(
-        self,
-        n_inputs: int = N_INPUTS,
-        n_hidden: int = N_HIDDEN,
-        n_outputs: int = N_OUTPUTS,
-    ):
-        super(ValueNet, self).__init__()
-        # Neural net layers
-        self.linear1 = nn.Linear(n_inputs, n_hidden)
-        self.linear2 = nn.Linear(n_hidden, 1)
-
-    def forward(self, x):
-        model = nn.Sequential(self.linear1, nn.Dropout(p=0.6), nn.ReLU(), self.linear2,)
-        return model(x)
+value_net = nn.Sequential(
+    nn.Linear(N_INPUTS, N_HIDDEN), nn.Dropout(p=0.6), nn.ReLU(), nn.Linear(N_HIDDEN, 1),
+)
 
 
 class MyAgent:
     def __init__(self, n_inputs: int = 4, n_hidden: int = 256, n_outputs: int = 2):
-        self.policy = PolicyNet()
+        self.policy = policy_net
         self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=LR)
-        self.value_func = ValueNet()
+        self.value_func = value_net
         self.value_func_optimizer = optim.Adam(self.value_func.parameters(), lr=LR)
         # Saved values from episodes
         self.episode_states: List[torch.Tensor] = []
@@ -120,10 +93,12 @@ class MyAgent:
         adv_ests = []
         policy_loss = np.zeros(len(self.episode_rewards), dtype=np.float32)
         R = 0
-        for i in range(len(self.episode_rewards) - 1, -1, -1):
-            R = self.episode_rewards[i] + GAMMA * R
-            state = self.episode_states[i]
-            adv_ests.insert(0, R - self.value_func.forward(state).squeeze(dim=1))
+        for i in range(len(self.episode_rewards) - 1):
+            R = self.episode_rewards[i]
+            V_current = self.value_func.forward(self.episode_states[i]).squeeze(dim=1)
+            V_next = self.value_func.forward(self.episode_states[i + 1]).squeeze(dim=1)
+            adv_ests.append(R + GAMMA * V_next - V_current)
+        adv_ests.append(self.episode_rewards[-1] - V_current)
         adv_ests = torch.cat(adv_ests)
         # print(adv_ests)
         # print(-torch.cat(self.episode_log_probs))
@@ -139,25 +114,28 @@ class MyAgent:
 agent = MyAgent()
 env = gym.make(GAME)
 
-running_reward = 0
+running_reward = np.zeros(MAX_EPISODES)
+episode_rewards = np.zeros(MAX_EPISODES)
 reward_decay = 0.95
 reward_decay_inv = 1 - reward_decay
 
 for i in range(1, MAX_EPISODES + 1):
     state = env.reset()
-    episode_rewards, episode_length = agent.run_episode(env, render=False)
+    episode_rewards[i - 1], episode_length = agent.run_episode(env, render=False)
     agent.train_on_episode()
-    running_reward = reward_decay * running_reward + reward_decay_inv * episode_rewards
+    running_reward[i] = (
+        reward_decay * running_reward[i - 1] + reward_decay_inv * episode_rewards[i - 1]
+    )
 
     if i % LOG_INTERVAL == 0:
         print(
-            f"Episode {i}\tLast reward: {episode_rewards:.2f}\t"
-            f"Running reward: {running_reward:.2f}"
+            f"Episode {i}\tLast reward: {episode_rewards[i-1]:.2f}\t"
+            f"Running reward: {running_reward[i]:.2f}"
         )
-    if running_reward > env.spec.reward_threshold:
+    if running_reward[i] > env.spec.reward_threshold:
         print(
-            f"Solved! Running reward is now {running_reward} and the last episode runs "
-            f"to {episode_length} time steps!"
+            f"Solved! Running reward is now {running_reward[i]} and the last episode "
+            f"runs to {episode_length} time steps!"
         )
         break
 
@@ -167,3 +145,13 @@ for _ in range(5):
     agent.run_episode(env, render=True)
 
 env.close()
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.plot(list(range(i)), episode_rewards[:i])
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.plot(list(range(i)), running_reward[:i])
+
+plt.show()
